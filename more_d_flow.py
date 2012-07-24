@@ -1,20 +1,27 @@
 #!/usr/bin/python2.7
 
+import collections
 import itertools
-
+import operator
+class NoneParent():
+   def _put(self, arg):
+      return arg
 class Flow():
    def __init__(self, *args, **kwargs):
       def _default_get(arg, parent, outputs):
-         parent._put(arg)
+         return parent._put(arg)
       self.child = kwargs.get("child", None)
       self.action = kwargs.get("action", _default_get)
       self.leveloutputs = {}
 
    def get(self, *args):
-      print "creating get"
       def _get(arg, parent, outputs):
-         outputs.get(args[0], [])(arg)
-         parent._put(arg)
+         for out in outputs[args[0]]:
+            if isinstance(out, Flow):
+               out.put(arg)
+            else:
+               out(arg)
+         return parent._put(arg)
       return Flow(child=self, action=_get)
 
    def alternate(self, *args):
@@ -23,31 +30,39 @@ class Flow():
       def _alternate(arg, parent, outputs):
          newarg = args[self.alternate_no](arg)
          self.alternate_no = (self.alternate_no + 1) % len(args)
-         parent._put(newarg)
+         return parent._put(newarg)
 
       return Flow(child=self, action=_alternate)
 
    def step(self, *args):
       def _step(arg, parent, outputs):
          newarg = args[0](arg)
-         parent._put(newarg)
+         return parent._put(newarg)
       return Flow(child=self, action=_step)
 
+   def reduce(self, *args):
+      self._current = args[0]
+      func = args[1]
+      def _reduce(arg, parent, outputs):
+         self._current = func(self._current, arg)
+         return parent._put(self._current)
+      return Flow(child=self, action=_reduce)
+
    def loop(self, *args):
-      print "constructing loop"
       flow = args[0]
       
       self.times = None if len(args) < 2 else args[1]
-      self._times = self.times
       def _loop(arg, parent, outputs):
-         if self._times is None:
-            flow.put(arg, parent=self, outputs=outputs)
-         elif self._times > 0:
-            self._times = self._times - 1
-            flow.put(arg, parent=self, outputs=outputs)
+         if self.times is None:
+            while True:
+               arg = flow.put(arg, parent=None, outputs=outputs)
+         elif hasattr(self.times, '__call__'):
+            while self.times(arg):
+               arg = flow.put(arg, parent=None, outputs=outputs)
          else:
-            parent._put(arg)
-         self._times = self.times
+            for _ in range(self.times):
+               arg = flow.put(arg, parent=None, outputs=outputs)
+         return parent._put(arg)
       return Flow(child=self, action=_loop)
 
    def on(self, *args):
@@ -55,67 +70,75 @@ class Flow():
       newflow.leveloutputs[args[0]] = args[1]
       return newflow
       
-   def takewhile(self, *args):
-      return Flow(child=self, action="takewhile", *args)
-
    def filter(self, *args):
-      return Flow(child=self, action="filter", *args)
+      def _filter(arg, parent, outputs):
+         if args[0](arg):
+            return parent._put(arg)
+      return Flow(child=self, action=_filter)
 
    # going down
    def put(self, arg, **kwargs):
       self.parent = kwargs.get("parent", None)
-      outputs = kwargs.get("outputs", {})
+      outputs = kwargs.get("outputs", collections.defaultdict(list))
 
-      self.outputs = dict(outputs, **self.leveloutputs)
 
+      self.outputs= collections.defaultdict(list)
+      for label, funcs in outputs.iteritems():
+         for func in funcs:
+            self.outputs[label].append(func)
+      for label, func in self.leveloutputs.iteritems():
+         self.outputs[label].append(func)
+
+      # reached the bottom (first step)
       if self.child is None:
-         self._put(arg)
-         return
+         return self._put(arg)
 
-      self.child.put(arg, parent=self, outputs=self.outputs)
+      return self.child.put(arg, parent=self, outputs=self.outputs)
 
    # coming up
    def _put(self, arg):
+      # reached the top (last step), so return arg (
+      # this will return down the _put's then up the put's
+      # so that something like the looping construct can
+      # avoid recursion
+      parent = self.parent
       if self.parent is None:
-         return
+         parent = NoneParent()
+
       # print "applying: ", self.action
-      self.action(arg, self.parent, self.outputs)
+      returnee = self.action(arg, parent, self.outputs)
       self.parent = None # clear state for next run...
       self.outputs = {}
+      return returnee
 
 def log(value):
    print value
-
+   return value
+def log2(value):
+   print value, "is running total!"
 def times4(value):
    return value * 4
 
 def divide3(value):
-   return value / 3.0
+   return value / 3 
 
 lessthan = lambda v : lambda x : x < v
+
 def data_flow():
    inner_loop = (Flow()
-      .alternate(times4, divide3)
-      .step(int)
-      .get("value2"))
-
-   arith = Flow().loop(inner_loop, 30)
-   """
-   arith = (Flow().startloop()
       .get("value")
       .alternate(times4, divide3)
       .step(int)
-      .endloop())
-   """ 
-   # can add arith.value sugar later...
-   bounded_arith = (arith.on("value", log).on("value2", log)
-      )#.takewhile(lessthan(10**6)))
-   
-   bounded_arith.put(500)
+      )
+
+   arith = Flow().loop(inner_loop, lessthan(10**4))
+
+   filtered = Flow().filter(lambda x: x % 3 == 0)
+  
+   filtered_reduced_log = filtered.step(log).reduce(0, operator.add).step(log2)
       
-   ##filtered_arith = bounded_arith.filter(lambda x: x % 3 == 0)
-   
-   #filtered_arith.put(300)
+   arith.on("value", filtered_reduced_log).put(300) 
+   print
 
 def imperative():
    def arith(value):
@@ -128,7 +151,7 @@ def imperative():
 
    # imap
    def bounded_arith(value):
-      for value in itertools.takewhile(lessthan(10**6), arith(value)):
+      for value in itertools.takewhile(lessthan(10**7), arith(value)):
          yield value
    
    def filtered_arith(value):
@@ -137,8 +160,8 @@ def imperative():
                      bounded_arith(value)):
          yield value 
    
-   map(log, bounded_arith(500))
+   #map(log, bounded_arith(500))
    map(log, filtered_arith(300))
 
 data_flow()
-# imperative()
+#imperative()
