@@ -18,7 +18,7 @@ class Flow():
       def _get(arg, parent, outputs):
          for out in outputs[args[0]]:
             if isinstance(out, Flow):
-               out.put(arg)
+               out.put(arg, outputs=outputs)
             else:
                out(arg)
          return parent._put(arg)
@@ -36,7 +36,11 @@ class Flow():
 
    def step(self, *args):
       def _step(arg, parent, outputs):
-         newarg = args[0](arg)
+         out = args[0]
+         if isinstance(out, Flow):
+            newarg = out.put(arg, outputs=outputs)
+         else:
+            newarg = out(arg) 
          return parent._put(newarg)
       return Flow(child=self, action=_step)
 
@@ -77,7 +81,7 @@ class Flow():
       return Flow(child=self, action=_filter)
 
    # going down
-   def put(self, arg, **kwargs):
+   def put(self, arg=None, **kwargs):
       self.parent = kwargs.get("parent", None)
       outputs = kwargs.get("outputs", collections.defaultdict(list))
 
@@ -125,6 +129,51 @@ def divide3(value):
 lessthan = lambda v : lambda x : x < v
 
 def data_flow():
+   plus1 = Flow().get("value").step(lambda x: x+1)
+   counter = Flow().loop(plus1, lessthan(11))
+   cube = Flow().step(lambda x: x**3).step(log)
+   cube.put(10)
+   cubes = counter.on("value", cube)
+   cubes.put(0)
+  
+   # 
+   fib_step = Flow().get("value").step(lambda (mi,mv, i,x,y): (mi,mv, i+1,y,x+y))
+   fib_trips = Flow().loop(fib_step, 
+      (lambda (mi,mv, i,x,y): 
+         ((mi is None or i < mi) 
+         and (mv is None or y < mv))))
+
+   extract = Flow().step(lambda (mi,mv,i,x,y): y)
+
+   def insert(maxes):
+      if maxes is None:
+         maxes = {}
+      iter_max = maxes.get("iter", None)
+      value_max = maxes.get("value", None)
+      return (iter_max, value_max, 1,1,1)
+
+   fibs = (Flow().step(insert)
+                .step(fib_trips)
+                .get("last"))
+   extract_and_log = extract.step(log)
+   fibs.on("value", log2).on("last", extract_and_log).put({"iter": 10})
+   fibs.on("value", log2).put({"value": 9010})
+
+   # all do the same thing:
+   fibs.on("last", extract_and_log).put({"value": 9010})
+   extract_and_log.put(fibs.put({"value":9010}))
+   fibs.step(extract_and_log).put({"value":9010})
+
+   def col(x):
+      if x % 2 == 0:
+         return x/2
+      else:
+         return x*3 + 1
+   collatz_step = Flow().get("value").step(col)
+   collatz = Flow().loop(collatz_step, lambda x: x != 1).get("value")
+   collatz.on("value", log).put(2472)
+
+
    inner_loop = (Flow()
       .get("value")
       .alternate(times4, divide3)
@@ -163,5 +212,5 @@ def imperative():
    #map(log, bounded_arith(500))
    map(log, filtered_arith(300))
 
-data_flow()
-#imperative()
+#data_flow()
+imperative()
