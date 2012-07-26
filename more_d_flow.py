@@ -34,6 +34,9 @@ class Flow():
 
       return Flow(child=self, action=_alternate)
 
+   def then(self, *args):
+      return self.step(*args)
+
    def step(self, *args):
       def _step(arg, parent, outputs):
          out = args[0]
@@ -43,6 +46,9 @@ class Flow():
             newarg = out(arg) 
          return parent._put(newarg)
       return Flow(child=self, action=_step)
+
+   def sum(self):
+      return self.reduce(0, operator.add)
 
    def reduce(self, *args):
       self._current = args[0]
@@ -70,6 +76,8 @@ class Flow():
             return parent._put(arg)
       return Flow(child=self, action=_loop)
 
+   def each(self, fun_or_flow):
+      return self.on("value", fun_or_flow)
    def on(self, *args):
       newflow = Flow(child=self)
       newflow.leveloutputs[args[0]] = args[1]
@@ -130,83 +138,115 @@ def divide3(value):
 lessthan = lambda v : lambda x : x < v
 
 def data_flow():
-   plus1 = Flow().get("value").step(lambda x: x+1)
-   counter = Flow().loop(plus1, lessthan(11))
-   cube = Flow().step(lambda x: x**3).step(log)
-   cube.put(10)
-   cubes = counter.on("value", cube)
-   cubes.put(0)
+   def basic():
+      plus1 = Flow().get("value").step(lambda x: x+1)
+      counter = Flow().loop(plus1, lessthan(11))
+      cube = Flow().step(lambda x: x**3).step(log)
+      cube.put(10)
+      cubes = counter.on("value", cube)
+      cubes.put(0)
   
-   # 
-   fib_step = Flow().get("value").step(lambda (mi,mv, i,x,y): (mi,mv, i+1,y,x+y))
-   fib_trips = Flow().loop(fib_step, 
-      (lambda (mi,mv, i,x,y): 
-         ((mi is None or i < mi) 
-         and (mv is None or y < mv))))
+   #fibonacci
+   def fibonacci():
+      fib_step = Flow().get("value").step(lambda (mi,mv, i,x,y): (mi,mv, i+1,y,x+y))
+      fib_trips = Flow().loop(fib_step, 
+         (lambda (mi,mv, i,x,y): 
+            ((mi is None or i < mi) 
+            and (mv is None or y < mv))))
 
-   extract = Flow().step(lambda (mi,mv,i,x,y): y)
+      extract = Flow().step(lambda (mi,mv,i,x,y): y)
 
-   def insert(maxes):
-      if maxes is None:
-         maxes = {}
-      iter_max = maxes.get("iter", None)
-      value_max = maxes.get("value", None)
-      return (iter_max, value_max, 1,1,1)
+      def insert(maxes):
+         if maxes is None:
+            maxes = {}
+         iter_max = maxes.get("iter", None)
+         value_max = maxes.get("value", None)
+         return (iter_max, value_max, 1,1,1)
 
-   fibs = (Flow().step(insert)
-                .step(fib_trips)
-                .get("last"))
-   extract_and_log = extract.step(log)
-   fibs.on("value", log2).on("last", extract_and_log).put({"iter": 10})
-   fibs.on("value", log2).put({"value": 9010})
+      fibs = (Flow().step(insert)
+                   .step(fib_trips)
+                   .get("last"))
+      extract_and_log = extract.step(log)
+      fibs.on("value", log2).on("last", extract_and_log).put({"iter": 10})
+      fibs.on("value", log2).put({"value": 9010})
 
-   # all do the same thing:
-   fibs.on("last", extract_and_log).put({"value": 9010})
-   extract_and_log.put(fibs.put({"value":9010}))
-   fibs.step(extract_and_log).put({"value":9010})
+      # all do the same thing:
+      fibs.on("last", extract_and_log).put({"value": 9010})
+      extract_and_log.put(fibs.put({"value":9010}))
+      fibs.step(extract_and_log).put({"value":9010})
 
    # collatz
-   def col(x):
-      if x % 2 == 0:
-         return x/2
-      else:
-         return x*3 + 1
-   collatz_step = Flow().get("value").step(col)
-   collatz = Flow().loop(collatz_step, lambda x: x != 1).get("value")
+   def collatz():
+      def col(x):
+         if x % 2 == 0:
+            return x/2
+         else:
+            return x*3 + 1
+      collatz_step = Flow().get("value").step(col)
+      collatz = Flow().loop(collatz_step, lambda x: x != 1).get("value")
 
-   # length:
-   length = Flow().reduce(0, lambda x,y: x+1).step(log)
-   collatz.on("value", log).on("value", length).put(2472)
+      # length:
+      length = Flow().reduce(0, lambda x,y: x+1).step(log)
+      collatz.on("value", log).on("value", length).put(2472)
 
    # reduce/filter
-   inner_loop = (Flow()
-      .get("value")
-      .alternate(times4, divide3)
-      .step(int)
-      )
+   def reduce_filter():
+      inner_loop = (Flow()
+         .get("value")
+         .alternate(times4, divide3)
+         .step(int)
+         )
 
-   arith = Flow().loop(inner_loop, lessthan(10**4))
+      arith = Flow().loop(inner_loop, lessthan(10**4))
 
-   filtered = Flow().filter(lambda x: x % 3 == 0)
-  
-   filtered_reduced_log = filtered.step(log).reduce(0, operator.add).step(log2)
-      
-   arith.on("value", filtered_reduced_log).put(300) 
-   print
+      filtered = Flow().filter(lambda x: x % 3 == 0)
+     
+      filtered_reduced_log = filtered.step(log).reduce(0, operator.add).step(log2)
+         
+      arith.on("value", filtered_reduced_log).put(300) 
+      print
 
    # primes:
-   counter = Flow().loop(Flow().step(lambda x: x+1).get("value"), lessthan(100))
-   primes = counter.on("value",
-      Flow()
-         .step(lambda num: (2,num, (int(num**0.5) + 1)))
-         .loop(
-            Flow().
-            filter(lambda (div,num,_): num % div !=0)
-            .step(lambda (div,num,sqrtnum): (div+1, num, sqrtnum)),
-            (lambda (div, num, sqrtnum): div < sqrtnum))
-         .step(lambda (div, num,_): num)
-         .get("prime"))
-   primes.on("prime", log).put(1)
+   def primes():
+      counter = Flow().loop(Flow().step(lambda x: x+1).get("value"), lessthan(50))
+      primes = counter.on("value",
+         Flow()
+            .step(lambda num: (2,num, (int(num**0.5) + 1)))
+            .loop(
+               Flow().
+               filter(lambda (div,num,_): num % div !=0)
+               .step(lambda (div,num,sqrtnum): (div+1, num, sqrtnum)),
+               (lambda (div, num, sqrtnum): div < sqrtnum))
+            .step(lambda (div, num,_): num)
+            .get("prime"))
+      primes.on("prime", log).put(1)
+   
+   # can raise StopIteration?
+   # Flow.stop
+   # Euler Q1
+   counter = lambda _max: Flow().loop(Flow().get("value").step(lambda x: x+1), lessthan(_max))
+   def EQ1():
+      """ Add all the natural numbers below one thousand
+         that are multiples of 3 or 5 """
+      
+      # dataflow:
+      counter(1000).each( 
+         Flow()
+            .filter(lambda x: x%3==0 or x%5 ==0)
+            .sum()
+            .then(log)
+         ).put(0)
+
+      # standard:
+      log(sum(x for x in range(1000) if x%3==0 or x%5 ==0))
+   # EQ1()
+   def EQ2():
+      """
+         By considering the terms in the Fibonacci sequence whose values do not
+         exceed four million, find the sum of the even-valued terms.
+      """
+      pass
+   EQ2()
 
 def imperative():
    def arith(value):
