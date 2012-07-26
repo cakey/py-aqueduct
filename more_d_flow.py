@@ -61,12 +61,13 @@ class Flow():
             while True:
                arg = flow.put(arg, parent=None, outputs=outputs)
          elif hasattr(self.times, '__call__'):
-            while self.times(arg):
+            while (arg is not None) and self.times(arg):
                arg = flow.put(arg, parent=None, outputs=outputs)
          else:
             for _ in range(self.times):
                arg = flow.put(arg, parent=None, outputs=outputs)
-         return parent._put(arg)
+         if arg is not None:
+            return parent._put(arg)
       return Flow(child=self, action=_loop)
 
    def on(self, *args):
@@ -164,6 +165,7 @@ def data_flow():
    extract_and_log.put(fibs.put({"value":9010}))
    fibs.step(extract_and_log).put({"value":9010})
 
+   # collatz
    def col(x):
       if x % 2 == 0:
          return x/2
@@ -171,9 +173,12 @@ def data_flow():
          return x*3 + 1
    collatz_step = Flow().get("value").step(col)
    collatz = Flow().loop(collatz_step, lambda x: x != 1).get("value")
-   collatz.on("value", log).put(2472)
 
+   # length:
+   length = Flow().reduce(0, lambda x,y: x+1).step(log)
+   collatz.on("value", log).on("value", length).put(2472)
 
+   # reduce/filter
    inner_loop = (Flow()
       .get("value")
       .alternate(times4, divide3)
@@ -188,6 +193,20 @@ def data_flow():
       
    arith.on("value", filtered_reduced_log).put(300) 
    print
+
+   # primes:
+   counter = Flow().loop(Flow().step(lambda x: x+1).get("value"), lessthan(100))
+   primes = counter.on("value",
+      Flow()
+         .step(lambda num: (2,num, (int(num**0.5) + 1)))
+         .loop(
+            Flow().
+            filter(lambda (div,num,_): num % div !=0)
+            .step(lambda (div,num,sqrtnum): (div+1, num, sqrtnum)),
+            (lambda (div, num, sqrtnum): div < sqrtnum))
+         .step(lambda (div, num,_): num)
+         .get("prime"))
+   primes.on("prime", log).put(1)
 
 def imperative():
    def arith(value):
@@ -212,5 +231,8 @@ def imperative():
    #map(log, bounded_arith(500))
    map(log, filtered_arith(300))
 
-#data_flow()
-imperative()
+data_flow()
+#imperative()
+
+#add1 =Flow().step(lambda x: x+1).step(log)
+#add1.put(2)
