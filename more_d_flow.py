@@ -8,26 +8,32 @@ class NoneParent():
       return arg
 class Flow():
    def __init__(self, *args, **kwargs):
-      def _default_get(arg, parent, outputs):
+      def _default_get(arg, parent, outputs, limits):
          return parent._put(arg)
       self.child = kwargs.get("child", None)
       self.action = kwargs.get("action", _default_get)
       self.leveloutputs = {}
+      self.levellimits = {}
 
-   def get(self, *args):
-      def _get(arg, parent, outputs):
-         for out in outputs[args[0]]:
-            if isinstance(out, Flow):
-               out.put(arg, outputs=outputs)
-            else:
-               out(arg)
-         return parent._put(arg)
+   def get(self, label):
+      def _get(arg, parent, outputs, limits):
+        
+         allowed = all(limit(arg) for limit in limits[label])
+         if allowed:
+            for out in outputs[label]:
+               if isinstance(out, Flow):
+                  out.put(arg, outputs=outputs, limits=limits)
+               else:
+                  out(arg)
+            return parent._put(arg)
+         else: 
+            raise StopIteration()
       return Flow(child=self, action=_get)
 
    def alternate(self, *args):
       self.alternate_no = 0
 
-      def _alternate(arg, parent, outputs):
+      def _alternate(arg, parent, outputs, limits):
          newarg = args[self.alternate_no](arg)
          self.alternate_no = (self.alternate_no + 1) % len(args)
          return parent._put(newarg)
@@ -38,10 +44,10 @@ class Flow():
       return self.step(*args)
 
    def step(self, *args):
-      def _step(arg, parent, outputs):
+      def _step(arg, parent, outputs, limits):
          out = args[0]
          if isinstance(out, Flow):
-            newarg = out.put(arg, outputs=outputs)
+            newarg = out.put(arg, outputs=outputs,limits=limits)
          else:
             newarg = out(arg) 
          return parent._put(newarg)
@@ -53,7 +59,7 @@ class Flow():
    def reduce(self, *args):
       self._current = args[0]
       func = args[1]
-      def _reduce(arg, parent, outputs):
+      def _reduce(arg, parent, outputs, limits):
          self._current = func(self._current, arg)
          return parent._put(self._current)
       return Flow(child=self, action=_reduce)
@@ -62,51 +68,74 @@ class Flow():
       flow = args[0]
       
       self.times = None if len(args) < 2 else args[1]
-      def _loop(arg, parent, outputs):
-         if self.times is None:
-            while True:
-               arg = flow.put(arg, parent=None, outputs=outputs)
-         elif hasattr(self.times, '__call__'):
-            while (arg is not None) and self.times(arg):
-               arg = flow.put(arg, parent=None, outputs=outputs)
-         else:
-            for _ in range(self.times):
-               arg = flow.put(arg, parent=None, outputs=outputs)
+      def _loop(arg, parent, outputs, limits):
+         try:  
+            if self.times is None:
+               while True:
+                  arg = flow.put(arg, parent=None, outputs=outputs, limits=limits)
+            elif hasattr(self.times, '__call__'):
+               while (arg is not None) and self.times(arg):
+                  arg = flow.put(arg, parent=None, outputs=outputs, limits=limits)
+            else:
+               for _ in range(self.times):
+                  arg = flow.put(arg, parent=None, outputs=outputs, limits=limits)
+         except StopIteration:
+            pass
          if arg is not None:
             return parent._put(arg)
       return Flow(child=self, action=_loop)
 
    def each(self, fun_or_flow):
       return self.on("value", fun_or_flow)
+
    def on(self, *args):
       newflow = Flow(child=self)
       newflow.leveloutputs[args[0]] = args[1]
       return newflow
+
+   def takewhile(self, label, limit_func):
+      newflow = Flow(child=self)
+      newflow.levellimits[label] = limit_func
+      return newflow
       
    def filter(self, *args):
-      def _filter(arg, parent, outputs):
+      def _filter(arg, parent, outputs, limits):
          if args[0](arg):
             return parent._put(arg)
       return Flow(child=self, action=_filter)
 
+   def __call__(self, *args, **kwargs):
+      return self.put(*args, **kwargs)
    # going down
    def put(self, arg=None, **kwargs):
       self.parent = kwargs.get("parent", None)
       outputs = kwargs.get("outputs", collections.defaultdict(list))
+      limits = kwargs.get("limits", collections.defaultdict(list))
 
 
       self.outputs= collections.defaultdict(list)
+      self.limits = collections.defaultdict(list)
+
+      # copy over outputs
       for label, funcs in outputs.iteritems():
          for func in funcs:
             self.outputs[label].append(func)
       for label, func in self.leveloutputs.iteritems():
          self.outputs[label].append(func)
 
+      # copy over limits
+      for label, funcs in limits.iteritems():
+         for func in funcs:
+            self.limits[label].append(func)
+
+      for label, func in self.levellimits.iteritems():
+         self.limits[label].append(func)
+
       # reached the bottom (first step)
       if self.child is None:
          return self._put(arg)
 
-      return self.child.put(arg, parent=self, outputs=self.outputs)
+      return self.child.put(arg, parent=self, outputs=self.outputs, limits=self.limits)
 
    # coming up
    def _put(self, arg):
@@ -119,9 +148,10 @@ class Flow():
          parent = NoneParent()
 
       # print "applying: ", self.action
-      returnee = self.action(arg, parent, self.outputs)
+      returnee = self.action(arg, parent, self.outputs, self.limits)
       self.parent = None # clear state for next run...
       self.outputs = {}
+      self.limits = {}
       return returnee
 
 def log(value):
@@ -147,26 +177,26 @@ def data_flow():
       cubes.put(0)
   
    #fibonacci
+   fib_step = Flow().get("value").step(lambda (mi,mv, i,x,y): (mi,mv, i+1,y,x+y))
+   fib_trips = Flow().loop(fib_step, 
+      (lambda (mi,mv, i,x,y): 
+         ((mi is None or i < mi) 
+         and (mv is None or y < mv))))
+
+   extract = Flow().step(lambda (mi,mv,i,x,y): y)
+
+   def insert(maxes):
+      if maxes is None:
+         maxes = {}
+      iter_max = maxes.get("iter", None)
+      value_max = maxes.get("value", None)
+      return (iter_max, value_max, 1,1,1)
+
+   fibs = (Flow().step(insert)
+                .step(fib_trips)
+                .get("last"))
+   extract_and_log = extract.step(log)
    def fibonacci():
-      fib_step = Flow().get("value").step(lambda (mi,mv, i,x,y): (mi,mv, i+1,y,x+y))
-      fib_trips = Flow().loop(fib_step, 
-         (lambda (mi,mv, i,x,y): 
-            ((mi is None or i < mi) 
-            and (mv is None or y < mv))))
-
-      extract = Flow().step(lambda (mi,mv,i,x,y): y)
-
-      def insert(maxes):
-         if maxes is None:
-            maxes = {}
-         iter_max = maxes.get("iter", None)
-         value_max = maxes.get("value", None)
-         return (iter_max, value_max, 1,1,1)
-
-      fibs = (Flow().step(insert)
-                   .step(fib_trips)
-                   .get("last"))
-      extract_and_log = extract.step(log)
       fibs.on("value", log2).on("last", extract_and_log).put({"iter": 10})
       fibs.on("value", log2).put({"value": 9010})
 
@@ -206,25 +236,10 @@ def data_flow():
       arith.on("value", filtered_reduced_log).put(300) 
       print
 
-   # primes:
-   def primes():
-      counter = Flow().loop(Flow().step(lambda x: x+1).get("value"), lessthan(50))
-      primes = counter.on("value",
-         Flow()
-            .step(lambda num: (2,num, (int(num**0.5) + 1)))
-            .loop(
-               Flow().
-               filter(lambda (div,num,_): num % div !=0)
-               .step(lambda (div,num,sqrtnum): (div+1, num, sqrtnum)),
-               (lambda (div, num, sqrtnum): div < sqrtnum))
-            .step(lambda (div, num,_): num)
-            .get("prime"))
-      primes.on("prime", log).put(1)
-   
    # can raise StopIteration?
    # Flow.stop
    # Euler Q1
-   counter = lambda _max: Flow().loop(Flow().get("value").step(lambda x: x+1), lessthan(_max))
+   counter = Flow().loop(Flow().get("value").step(lambda x: x+1))
    def EQ1():
       """ Add all the natural numbers below one thousand
          that are multiples of 3 or 5 """
@@ -240,14 +255,83 @@ def data_flow():
       # standard:
       log(sum(x for x in range(1000) if x%3==0 or x%5 ==0))
    # EQ1()
+
+   even = lambda x: x%2 == 0
    def EQ2():
       """
          By considering the terms in the Fibonacci sequence whose values do not
          exceed four million, find the sum of the even-valued terms.
       """
-      pass
-   EQ2()
+      fibs.each(
+         Flow()
+            .step(extract)
+            .filter(even)
+            .sum()
+            .then(log)
+         ).put({"value":4000000})
+   #EQ2()
+   primes = counter.on("value",
+      Flow()
+         .step(lambda num: (2,num, (int(num**0.5) + 1)))
+         .loop(
+            Flow().
+            filter(lambda (div,num,_): num % div !=0)
+            .step(lambda (div,num,sqrtnum): (div+1, num, sqrtnum)),
+            (lambda (div, num, sqrtnum): div < sqrtnum))
+         .step(lambda (div, num,_): num)
+         .get("prime"))
+   def EQ3():
+      """
+         What is the largest prime factor of the number 600851475143?
+      """
+      primes(int(600851475143**0.5)).on("prime",
+         Flow()
+            .filter(lambda x: 600851475143 % x ==0)
+            .then(log)
+         ).put(1)
+   #EQ3()
 
+   def EQ4():
+      """
+         Find the largest palindrome made from the product of two 3-digit numbers.
+      """
+      counter = Flow().loop(
+            Flow()
+               .step(lambda (x,y): (x-1, 999)) 
+               .loop(
+         Flow()
+            .get("value")
+            .step(lambda (x, y): (x, y-1))
+         , lambda (x, y): y>x
+         ), lambda (x, y): x>909)
+      log_palindrome_products = (Flow()
+         .step(lambda (x,y): x*y)
+         .filter(lambda v: str(v) == str(v)[::-1])
+         .reduce(0, lambda x,y: max(x,y))
+         .then(log))
+      counter.each(log_palindrome_products).put((1000,0))
+      #combiner = Flow().get("moo")
+
+      #logcombiner = combiner.on("moo", log)
+      #counter.takewhile("value", lessthan(10)).each(logcombiner).put(0)
+      #counter.takewhile("value", lessthan(20)).each(logcombiner).put(10)
+      print "hi"
+         
+   #EQ4()
+   def EQ6():
+      """ Find the difference between the sum of the squares of the first one hundred 
+         natural numbers and square of the sum """
+
+      # wants a branch/combine function
+   def EQ7():
+      """ 10001st prime """
+      length = (Flow()
+         .reduce(0, lambda x,y: x+1)
+         .get("length"))
+      primes.on("prime",log).on("prime", length.step(log)).takewhile("length", lessthan(10002)).put(2)
+      # wants a 'fresh' for length
+      # wants a way to take the last value after a stopIteration
+   EQ7()
 def imperative():
    def arith(value):
       funcs = [times4, divide3]
